@@ -187,16 +187,11 @@ class ClientInstance(object):
             while buf:
                 decompressobj = zlib.decompressobj()
                 try:
-                    data = decompressobj.decompress(buf)
-                except zlib.error:
-                    # Probably short read?
+                    message = rencode.loads(decompressobj.decompress(buf))
+                except:
+                    log().debug("bad encoding. short read?")
                     break
                 buf = decompressobj.unused_data
-                try:
-                    message = rencode.loads(data)
-                except rencode.error:
-                    log().exception("bad data from server")
-                    continue
                 log().debug("received: %s", message)
                 try:
                     self.got_message(message)
@@ -370,8 +365,10 @@ class Client(object):
     def request(self, method, *args, **kwargs):
         return self._get_ci().request(method, *args, **kwargs)
 
-    def call(self, method, *args, timeout=None, **kwargs):
-        if timeout is None:
+    def call(self, method, *args, **kwargs):
+        if "timeout" in kwargs:
+            timeout = kwargs.pop("timeout")
+        else:
             timeout = self.timeout
         # Explicitly hold a reference in this frame
         request = self.request(method, *args, **kwargs)
