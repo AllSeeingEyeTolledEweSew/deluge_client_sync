@@ -260,7 +260,6 @@ class ClientInstance(object):
             log().error("received unknown RPC message type %s", msg_type)
 
     def got_event(self, event_name, *event_data):
-        log().debug("got event: %s", event_name)
         with self.lock:
             handlers = self._event_to_handlers.get(event_name, ())
         for handler in handlers:
