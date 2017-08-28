@@ -126,7 +126,8 @@ class ClientInstance(object):
             self.request_queue.put(r)
 
         threading.Thread(
-            target=self.connector, name="connector-%x" % hash(self)).start()
+            target=self.connector, name="connector-%x" % hash(self),
+            daemon=True).start()
 
     def get_initial_requests(self):
         with self.lock:
@@ -329,9 +330,11 @@ class ClientInstance(object):
         log().debug("connected")
 
         threading.Thread(
-            target=self.receiver, name="receiver-%x" % hash(self)).start()
+            target=self.receiver, name="receiver-%x" % hash(self),
+            daemon=True).start()
         threading.Thread(
-            target=self.sender, name="sender-%x" % hash(self)).start()
+            target=self.sender, name="sender-%x" % hash(self),
+            daemon=True).start()
 
     def connector(self):
         with self.exceptions_are_fatal(Exception):
