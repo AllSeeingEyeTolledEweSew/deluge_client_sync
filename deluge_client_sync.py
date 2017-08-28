@@ -8,6 +8,7 @@ import Queue
 import socket
 import ssl
 import threading
+import time
 import weakref
 import zlib
 
@@ -62,10 +63,17 @@ class EOF(Error):
         super(EOF, self).__init__("EOF")
 
 
+class EncodingError(Error):
+
+    def __init__(self, *args, **kwargs):
+        super(EncodingError, self).__init__(*args, **kwargs)
+
+
 class RPCError(Error):
 
     def __init__(self, request, exc_type, exc_message, exc_traceback):
-        super(RPCError, self).__init__(exc_message)
+        super(RPCError, self).__init__(exc_type, exc_message)
+        self.message = exc_message
         self.request = request
         self.type = exc_type
         self.traceback = exc_traceback
@@ -94,6 +102,7 @@ class ClientInstance(object):
         self.port = client.port
         self.username = client.username
         self.password = client.password
+        self.timeout = client.timeout
 
         # We do need to set sockets to be non-blocking, because
         # SSLSocket.recv() will never return on a non-blocking socket that has
@@ -169,7 +178,14 @@ class ClientInstance(object):
     def receiver_inner(self):
         log().debug("starting")
         buf = b""
+        first_bad_encoding_time = None
         while True:
+            # Defend against stream corruption bugs I haven't fixed yet.
+            if (first_bad_encoding_time is not None and
+                    time.time() - first_bad_encoding_time > self.timeout):
+                raise EncodingError(
+                    "%ss without good encoding, assuming stream corruption" %
+                    self.timeout)
             # recv() on a blocking SSLSocket won't return when the socket is
             # closed, so we need to set a timeout to avoid receiver lasting
             # forever.
@@ -181,18 +197,40 @@ class ClientInstance(object):
                 # This happens on a graceful shutdown from our side.
                 if e.errno == errno.EBADF:
                     break
+                # Not sure why this happens? Some race condition in ssl?
+                if e.errno == errno.EAGAIN:
+                    continue
+                raise
+            except ssl.SSLWantReadError:
+                # Uh, for some reason this except block doesn't actually work.
+                continue
             if len(part) == 0:
                 raise EOF()
             buf += part
             while buf:
-                decompressobj = zlib.decompressobj()
-                try:
-                    message = rencode.loads(decompressobj.decompress(buf))
-                except:
+                # I found examples of messages for which
+                # zlib.decompress(buf) == zlib.decompress(buf[:-1])
+                # That is, you can truncate one byte and still get the same
+                # message. If we receive the first n - 1 bytes in one frame,
+                # we'll successfully decompress it, but the leftover byte will
+                # corrupt the stream on the next pass.
+                for offset in range(4):
+                    d = zlib.decompressobj()
+                    try:
+                        message = rencode.loads(d.decompress(buf[offset:]))
+                        if offset:
+                            log().warning("offset stream by %s...", offset)
+                        break
+                    except:
+                        pass
+                else:
                     log().debug("bad encoding. short read?")
+                    if first_bad_encoding_time is None:
+                        first_bad_encoding_time = time.time()
                     break
-                buf = decompressobj.unused_data
-                log().debug("received: %s", message)
+                first_bad_encoding_time = None
+                buf = d.unused_data
+                log().debug("received: %s", str(message)[:100])
                 try:
                     self.got_message(message)
                 except Exception:
