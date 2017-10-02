@@ -125,9 +125,10 @@ class ClientInstance(object):
         for r in initial_requests:
             self.request_queue.put(r)
 
-        threading.Thread(
-            target=self.connector, name="connector-%x" % hash(self),
-            daemon=True).start()
+        connector = threading.Thread(
+            target=self.connector, name="connector-%x" % hash(self))
+        connector.daemon = True
+        connector.start()
 
     def get_initial_requests(self):
         with self.lock:
@@ -194,6 +195,11 @@ class ClientInstance(object):
                 part = self.socket.recv(self.RECV_SIZE)
             except socket.timeout:
                 continue
+            except ssl.SSLError as e:
+                # This seems to happen in python 2.7.
+                if e.args == (b"The read operation timed out",):
+                    continue
+                raise
             except OSError as e:
                 # This happens on a graceful shutdown from our side.
                 if e.errno == errno.EBADF:
@@ -329,12 +335,14 @@ class ClientInstance(object):
         self.socket.connect((self.host, self.port))
         log().debug("connected")
 
-        threading.Thread(
-            target=self.receiver, name="receiver-%x" % hash(self),
-            daemon=True).start()
-        threading.Thread(
-            target=self.sender, name="sender-%x" % hash(self),
-            daemon=True).start()
+        receiver = threading.Thread(
+            target=self.receiver, name="receiver-%x" % hash(self))
+        receiver.daemon = True
+        receiver.start()
+        sender = threading.Thread(
+            target=self.sender, name="sender-%x" % hash(self))
+        sender.daemon = True
+        sender.start()
 
     def connector(self):
         with self.exceptions_are_fatal(Exception):
