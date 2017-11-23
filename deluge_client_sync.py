@@ -91,6 +91,31 @@ class Request(object):
 
         self.future = concurrent.futures.Future()
 
+    def cancel(self):
+        return self.future.cancel()
+
+    def cancelled(self):
+        return self.future.cancelled()
+
+    def running(self):
+        return self.future.running()
+
+    def done(self):
+        return self.future.done()
+
+    def result(self, timeout=None):
+        if timeout is None:
+            timeout = self.ci.timeout
+        return self.future.result(timeout=timeout)
+
+    def exception(self, timeout=None):
+        if timeout is None:
+            timeout = self.ci.timeout
+        return self.future.exception(timeout=timeout)
+
+    def add_done_callback(self, fn):
+        return self.future.add_done_callback(fn)
+
 
 class ClientInstance(object):
 
