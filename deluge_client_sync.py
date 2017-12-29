@@ -29,14 +29,9 @@ def log():
     return logging.getLogger(__name__)
 
 
-def get_localhost_auth():
-    try:
-        from xdg.BaseDirectory import save_config_path
-    except ImportError:
-        return (None, None)
-    path = os.path.join(save_config_path("deluge"), "auth")
-    if not os.path.exists(path):
-        return (None, None)
+def auth_from_file(path, username=None):
+    if not username:
+        username = "localclient"
     with open(path) as f:
         for line in f:
             if line.startswith("#"):
@@ -45,11 +40,25 @@ def get_localhost_auth():
             lsplit = line.split(":")
 
             if len(lsplit) in (2, 3):
-                username, password = lsplit[:2]
+                u, password = lsplit[:2]
 
-            if username == "localclient":
-                return (username, password)
+            if u == username:
+                return (u, password)
     return (None, None)
+
+def auth_from_config_dir(path, username=None):
+    path = os.path.join(path, "auth")
+    if not os.path.exists(path):
+        return (None, None)
+    return auth_from_file(path, username=username)
+
+
+def get_localhost_auth():
+    try:
+        from xdg.BaseDirectory import save_config_path
+    except ImportError:
+        return (None, None)
+    return auth_from_config_dir(save_config_path("deluge"))
 
 
 class Error(Exception):
@@ -394,11 +403,14 @@ class ClientInstance(object):
 class Client(object):
 
     def __init__(self, host=None, port=None, username=None, password=None,
-                 timeout=None, max_event_workers=None, ssl_factory=None,
-                 socket_factory=None):
+                 config_dir=None, timeout=None, max_event_workers=None,
+                 ssl_factory=None, socket_factory=None):
         self.host = host or "localhost"
         self.port = port or DEFAULT_PORT
-        if not username and host in ("127.0.0.1", "localhost"):
+        if not password and config_dir:
+            username, password = auth_from_config_dir(
+                config_dir, username=username)
+        if not password and host in ("127.0.0.1", "localhost"):
             username, password = get_localhost_auth()
         self.username = username or ""
         self.password = password or ""
