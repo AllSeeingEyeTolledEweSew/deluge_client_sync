@@ -9,7 +9,7 @@ with open("README") as readme:
 
 setup(
     name="deluge-client-sync",
-    version="0.1.0",
+    version="0.1.1",
 
     description="A synchronous API to deluge using normal python code (no "
     "TwistedMatrix, no asyncio)",

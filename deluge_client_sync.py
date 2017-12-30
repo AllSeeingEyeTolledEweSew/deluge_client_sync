@@ -20,11 +20,6 @@ RPC_ERROR = 2
 RPC_EVENT = 3
 
 
-DEFAULT_PORT = 58846
-DEFAULT_TIMEOUT = 30
-DEFAULT_EVENT_WORKERS = 16
-
-
 def log():
     return logging.getLogger(__name__)
 
@@ -400,13 +395,45 @@ class ClientInstance(object):
             return r
 
 
+def add_arguments(parser, create_group=False):
+    if create_group:
+        target = parser.add_argument_group("Deluge Client Options")
+    else:
+        target = parser
+
+    target.add_argument("--deluge_config_dir")
+    target.add_argument("--deluge_host")
+    target.add_argument("--deluge_port", type=int, default=Client.DEFAULT_PORT)
+    target.add_argument("--deluge_username")
+    target.add_argument("--deluge_password")
+    target.add_argument(
+        "--deluge_timeout", type=int, default=Client.DEFAULT_TIMEOUT)
+    target.add_argument(
+        "--deluge_max_event_workers", type=int,
+        default=Client.DEFAULT_EVENT_WORKERS)
+
+    return target
+
+
 class Client(object):
+
+    DEFAULT_PORT = 58846
+    DEFAULT_TIMEOUT = 30
+    DEFAULT_EVENT_WORKERS = 16
+
+    @classmethod
+    def from_args(cls, parser, args, **kwargs):
+        return cls(
+            host=args.deluge_host, port=args.deluge_port,
+            username=args.deluge_username, password=args.deluge_password,
+            config_dir=args.deluge_config_dir, timeout=args.deluge_timeout,
+            **kwargs)
 
     def __init__(self, host=None, port=None, username=None, password=None,
                  config_dir=None, timeout=None, max_event_workers=None,
                  ssl_factory=None, socket_factory=None):
         self.host = host or "localhost"
-        self.port = port or DEFAULT_PORT
+        self.port = port or self.DEFAULT_PORT
         if not password and config_dir:
             username, password = auth_from_config_dir(
                 config_dir, username=username)
@@ -414,8 +441,8 @@ class Client(object):
             username, password = get_localhost_auth()
         self.username = username or ""
         self.password = password or ""
-        self.timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-        max_event_workers = max_event_workers or DEFAULT_EVENT_WORKERS
+        self.timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT
+        max_event_workers = max_event_workers or self.DEFAULT_EVENT_WORKERS
 
         if ssl_factory is not None:
             self.ssl_factory = ssl_factory
