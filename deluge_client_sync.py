@@ -7,6 +7,7 @@ import os
 import Queue
 import socket
 import ssl
+import struct
 import threading
 import time
 import weakref
@@ -126,6 +127,10 @@ class ClientInstance(object):
     RECV_SIZE = 256 * 1024
     TIMEOUT = 5
 
+    REQUEST_LOGIN = 0
+    REQUEST_SET_EVENT_INTEREST = 1
+    REQUEST_NORMAL = 2
+
     def __init__(self, client):
         self.host = client.host
         self.port = client.port
@@ -138,39 +143,64 @@ class ClientInstance(object):
         # been closed.
         self.socket = client.ssl_factory().wrap_socket(client.socket_factory())
         self.socket.settimeout(self.TIMEOUT)
-        self.request_queue = Queue.Queue()
         self.event_pool = client._event_pool
 
-        self.lock = client._lock
+        self.cv = threading.Condition(lock=client._lock)
         self._event_to_handlers = client._event_to_handlers
         self._event_to_registration = {}
         self._next_request_id = 0
         self._id_to_request = weakref.WeakValueDictionary()
+        self._request_queue = Queue.PriorityQueue()
         self._running = True
-
-        initial_requests = list(self.get_initial_requests())
-        # Special case: after initial requests are sent the normal way, block
-        # the sender on waiting for them to complete.
-        for r in initial_requests:
-            self.request_queue.put(r)
+        self._login_stage = self.REQUEST_LOGIN
+        self._protocol_version = 1
 
         connector = threading.Thread(
             target=self.connector, name="connector-%x" % hash(self))
         connector.daemon = True
         connector.start()
 
-    def get_initial_requests(self):
-        with self.lock:
-            yield self.request("daemon.login", self.username, self.password)
+    def loginner(self):
+        with self.exceptions_are_fatal(Exception):
+            self.loginner_inner()
+
+    def loginner_inner(self):
+        for version in (2, 1):
+            kwargs = {}
+            if version != 1:
+                kwargs["protocol_version"] = version
+            r = self._request(
+                self.REQUEST_LOGIN, "daemon.login", self.username,
+                self.password, **kwargs)
+            try:
+                r.result()
+            except RPCError as e:
+                if e.type in (b"TypeError", b"InvalidProtocolVersionError"):
+                    continue
+                else:
+                    raise
+            else:
+                break
+        with self.cv:
+            self._protocol_version = version
+            self._login_stage = self.REQUEST_SET_EVENT_INTEREST
             event_names = list(self._event_to_handlers.keys())
+            r = None
             if event_names:
-                r = self.request("daemon.set_event_interest", event_names)
+                r = self._request(
+                    self.REQUEST_SET_EVENT_INTEREST,
+                    "daemon.set_event_interest", event_names)
                 self._event_to_registration.update(
                     {n: r for n in event_names})
-                yield r
+            self.cv.notify_all()
+        if r:
+            r.result()
+        with self.cv:
+            self._login_stage = self.REQUEST_NORMAL
+            self.cv.notify_all()
 
     def running(self):
-        with self.lock:
+        with self.cv:
             return self._running
 
     def _terminate_locked(self, e):
@@ -193,9 +223,10 @@ class ClientInstance(object):
                     request.future.set_exception(e)
 
         self._running = False
+        self.cv.notify_all()
 
     def terminate(self, e):
-        with self.lock:
+        with self.cv:
             self._terminate_locked(e)
 
     @contextlib.contextmanager
@@ -244,29 +275,47 @@ class ClientInstance(object):
                 raise EOF()
             buf += part
             while buf:
-                # I found examples of messages for which
-                # zlib.decompress(buf) == zlib.decompress(buf[:-1])
-                # That is, you can truncate one byte and still get the same
-                # message. If we receive the first n - 1 bytes in one frame,
-                # we'll successfully decompress it, but the leftover byte will
-                # corrupt the stream on the next pass.
-                for offset in range(4):
+                with self.cv:
+                    protocol_version = self._protocol_version
+                if protocol_version < 2:
+                    # I found examples of messages for which
+                    # zlib.decompress(buf) == zlib.decompress(buf[:-1])
+                    # That is, you can truncate one byte and still get the same
+                    # message. If we receive the first n - 1 bytes in one frame,
+                    # we'll successfully decompress it, but the leftover byte will
+                    # corrupt the stream on the next pass.
+                    for offset in range(4):
+                        d = zlib.decompressobj()
+                        try:
+                            message = rencode.loads(d.decompress(buf[offset:]))
+                            if offset:
+                                log().warning("offset stream by %s...", offset)
+                            break
+                        except:
+                            pass
+                    else:
+                        log().debug("bad encoding. short read?")
+                        if first_bad_encoding_time is None:
+                            first_bad_encoding_time = time.time()
+                        break
+                    first_bad_encoding_time = None
+                    buf = d.unused_data
+                else:
+                    if len(buf) < 4:
+                        break
+                    length = struct.unpack("<L", buf[:4])[0]
+                    if len(buf) < length + 4:
+                        break
+                    message = buf[4:length + 4]
+                    buf = buf[length + 4:]
                     d = zlib.decompressobj()
                     try:
-                        message = rencode.loads(d.decompress(buf[offset:]))
-                        if offset:
-                            log().warning("offset stream by %s...", offset)
-                        break
+                        message = rencode.loads(d.decompress(message))
                     except:
-                        pass
-                else:
-                    log().debug("bad encoding. short read?")
-                    if first_bad_encoding_time is None:
-                        first_bad_encoding_time = time.time()
-                    break
-                first_bad_encoding_time = None
-                buf = d.unused_data
-                log().debug("received: %s", str(message)[:100])
+                        log().warning("bad message of length %s", length)
+                        continue
+                if log().isEnabledFor(logging.DEBUG):
+                    log().debug("received: %s", str(message)[:100])
                 try:
                     self.got_message(message)
                 except Exception:
@@ -279,41 +328,48 @@ class ClientInstance(object):
         finally:
             log().debug("shutting down")
 
+    def get_request_locked(self):
+        try:
+            p, _, request = self._request_queue.get_nowait()
+        except Queue.Empty:
+            return None
+        if p > self._login_stage:
+            self._request_queue.put((p, request.request_id, request))
+            return None
+        return request
+
     def sender_inner(self):
         log().debug("starting")
         while True:
-            # Clear references
-            request = None
-            # Check every 1s to make sure we're still running.
-            try:
-                request = self.request_queue.get(True, 1)
-            except Queue.Empty:
-                if self.running():
-                    continue
-                else:
-                    break
-            # Special case: we want to block on the initial RPCs (login and
-            # set_event_interest) before sending any others. We want the errors
-            # from those RPCs to propogate to any others.
-            if request.future.running() or request.future.done():
-                request.future.result()
-            else:
-                if not request.future.set_running_or_notify_cancel():
-                    continue
-                message = ((
-                    request.request_id, request.method, request.args,
-                    request.kwargs),)
-                log().debug("sending: %s", message)
-                data = zlib.compress(rencode.dumps(message))
+            with self.cv:
+                while True:
+                    if not self._running:
+                        return
+                    request = self.get_request_locked()
+                    if request:
+                        break
+                    self.cv.wait()
+                protocol_version = self._protocol_version
+            if not request.future.set_running_or_notify_cancel():
                 # Clear references
-                message = None
-                rquest = None
-                while data:
-                    try:
-                        n = self.socket.send(data)
-                    except socket.timeout:
-                        continue
-                    data = data[n:]
+                request = None
+                continue
+            message = ((
+                request.request_id, request.method, request.args,
+                request.kwargs),)
+            log().debug("sending: %s", message)
+            data = zlib.compress(rencode.dumps(message))
+            if protocol_version >= 2:
+                data = struct.pack("<L", len(data)) + data
+            # Clear references
+            message = None
+            request = None
+            while data:
+                try:
+                    n = self.socket.send(data)
+                except socket.timeout:
+                    continue
+                data = data[n:]
 
     def sender(self):
         try:
@@ -334,14 +390,14 @@ class ClientInstance(object):
             log().error("received unknown RPC message type %s", msg_type)
 
     def got_event(self, event_name, *event_data):
-        with self.lock:
-            handlers = self._event_to_handlers.get(event_name, ())
+        with self.cv:
+            handlers = list(self._event_to_handlers.get(event_name, ()))
         for handler in handlers:
             self.event_pool.submit(handler, *event_data)
 
     def got_rpc_response_or_error(self, msg_type, request_id, result):
         try:
-            with self.lock:
+            with self.cv:
                 request = self._id_to_request.pop(request_id)
         except KeyError:
             log().debug(
@@ -364,6 +420,10 @@ class ClientInstance(object):
         self.socket.connect((self.host, self.port))
         log().debug("connected")
 
+        loginner = threading.Thread(
+            target = self.loginner, name="loginner-%x" % hash(self))
+        loginner.daemon = True
+        loginner.start()
         receiver = threading.Thread(
             target=self.receiver, name="receiver-%x" % hash(self))
         receiver.daemon = True
@@ -377,20 +437,26 @@ class ClientInstance(object):
         with self.exceptions_are_fatal(Exception):
             self.connector_inner()
 
-    def request(self, method, *args, **kwargs):
-        with self.lock:
+    def _request(self, p, method, *args, **kwargs):
+        with self.cv:
             request = Request(
                 self, self._next_request_id, method, args, kwargs)
             self._next_request_id += 1
             self._id_to_request[request.request_id] = request
-            self.request_queue.put(request)
+            self._request_queue.put((p, request.request_id, request))
+            self.cv.notify_all()
             return request
 
+    def request(self, method, *args, **kwargs):
+        return self._request(self.REQUEST_NORMAL, method, *args, **kwargs)
+
     def request_register_event(self, event_name):
-        with self.lock:
+        with self.cv:
             r = self._event_to_registration.get(event_name)
             if (not r) or (r.future.done() and r.future.exception()):
-                r = self.request("daemon.set_event_interest", [event_name])
+                r = self._request(
+                    self.REQUEST_SET_EVENT_INTEREST,
+                    "daemon.set_event_interest", [event_name])
                 self._event_to_registration[event_name] = r
             return r
 
