@@ -9,8 +9,7 @@ with open("README") as readme:
 
 setup(
     name="deluge-client-sync",
-    version="0.1.1",
-
+    version="1.0.0",
     description="A synchronous API to deluge using normal python code (no "
     "TwistedMatrix, no asyncio)",
     long_description=documentation,
@@ -24,5 +23,16 @@ setup(
         "rencode>=1.0.0",
         "pyxdg>=0.25",
         "futures>=3.1.1;python_version<\"3.2\"",
-    ]
+    ],
+    classifiers=[
+        "Development Status :: 5 - Production/Stable",
+        "Intended Audience :: Developers",
+        "License :: Public Domain",
+        "Programming Language :: Python",
+        "Topic :: Communications :: File Sharing",
+        "Topic :: Software Development :: Libraries :: Python Modules",
+        "Topic :: System :: Networking",
+        "Operating System :: OS Independent",
+        "License :: Public Domain",
+    ],
 )
